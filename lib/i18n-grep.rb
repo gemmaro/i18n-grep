@@ -1,46 +1,61 @@
+require "yaml"
+
 module I18n
   class << self
     def grep(pattern, files)
       results = []
 
       files.each do |filepath|
-        File.open(filepath) do |file|
-          key_stack = []
-          prev_indent = 0
-          indent_spaces = nil
-          file.each_with_index do |line, index|
-            line = line.chomp
-            line_number = index + 1
-            next unless line =~ /\s*\w+:/
-
-            key = line[/\w+:/].sub(':', '')
-            word = line.gsub(/.*:\s*/, '')
-
-            indent = (line =~ /\w/)
-            if indent_spaces.nil? && indent > 0
-              indent_spaces = indent
-            end
-            indent /= indent_spaces if indent > 0
-
-            unless indent == prev_indent
-              if indent < prev_indent
-                (prev_indent - indent + 1).times { key_stack.pop }
-              end
-            else
-              key_stack.pop
-            end
-            key_stack.push(key)
-            prev_indent = indent
-
-            joined_key = key_stack.join('.')
-            if joined_key =~ /#{pattern}/
-              results << [filepath, line_number, joined_key, word]
-            end
-          end
+        document = YAML.parse_file(filepath)
+        messages = Set.new
+        extract_messages_recursively(document, namespace: [], messages:)
+        messages.each do |message|
+          results << [filepath,
+                      message[:line_number],
+                      message[:namespace].join('.'),
+                      message[:message]]
         end
       end
 
       results
+    end
+
+    module YAMLPatternMatch
+      refine YAML::Nodes::Document do
+        def deconstruct_keys(*_keys)
+          { children: }
+        end
+      end
+
+      refine YAML::Nodes::Mapping do
+        def deconstruct_keys(*_keys)
+          { children: }
+        end
+      end
+
+      refine YAML::Nodes::Scalar do
+        def deconstruct_keys(*_keys)
+          { value: }
+        end
+      end
+    end
+
+    using YAMLPatternMatch
+
+    def extract_messages_recursively(node, namespace:, messages:)
+      case node
+      in YAML::Nodes::Document[children:]
+        children.each do |child|
+          extract_messages_recursively(child, namespace:, messages:)
+        end
+      in YAML::Nodes::Mapping[children:]
+        children.each_slice(2) do |key, value|
+          key => YAML::Nodes::Scalar[value: String => key]
+          extract_messages_recursively(value, namespace: [*namespace, key], messages:)
+        end
+      in YAML::Nodes::Scalar[value: String => message]
+        messages << { namespace:, message:, line_number: node.start_line }
+      end
     end
   end
 end
